@@ -19,7 +19,7 @@ defmodule Kekyl.Mixfile do
   def application do
     [mod: {Kekyl, []},
      applications: [:phoenix, :phoenix_pubsub, :phoenix_html, :cowboy, :logger, :gettext,
-                    :phoenix_ecto, :postgrex]]
+                    :phoenix_ecto, :postgrex, :tentacat]]
   end
 
   # Specifies which paths to compile per environment.
@@ -37,7 +37,9 @@ defmodule Kekyl.Mixfile do
      {:phoenix_html, "~> 2.6"},
      {:phoenix_live_reload, "~> 1.0", only: :dev},
      {:gettext, "~> 0.11"},
-     {:cowboy, "~> 1.0"}]
+     {:cowboy, "~> 1.0"},
+     {:tentacat, "~> 0.5"},
+     {:earmark, "~> 1.2"},]
   end
 
   # Aliases are shortcuts or tasks specific to the current project.
