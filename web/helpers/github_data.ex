@@ -1,6 +1,8 @@
 defmodule Kekyl.GithubData do
 
-  import Kekyl.EarmarkTypeChecker
+  alias Kekyl.Repo
+  alias Kekyl.Section
+  alias Kekyl.Content
 
   @table_name :github_data
   @record_name "awesome_readme"
@@ -35,8 +37,10 @@ defmodule Kekyl.GithubData do
     {:error, "parse_repo_readme - unxpected result"}
   end
   
-  def parse_readme_content({content, context}) do
-    contents_list = Enum.find(content, [], fn(item) -> is_earmark_list item end)
+  def parse_readme_content({content, _}) do
+    Enum.find(content, [], fn(item) -> is_earmark_list item end)
+    |> find_data_in_contents 
+    |> Enum.map(fn(section) -> store_section section end)
   end
 
   def is_earmark_list(%Earmark.Block.List{}) do
@@ -46,27 +50,49 @@ defmodule Kekyl.GithubData do
   def is_earmark_list(_) do
     false
   end
-
-  def store_readme_contents( element = %Earmark.Block.List{}, depth \\ 0) do
-    Enum.map(element.blocks, fn(list_item) -> store_readme_contents(list_item, depth+1) end)
+  
+  defp find_data_in_contents(element = %Earmark.Block.List{}) do
+    Enum.map(element.blocks, fn(list_item) -> find_data_in_contents list_item end)
   end
   
-  def store_readme_contents( element = %Earmark.Block.ListItem{}, depth) do
-    Enum.map(element.blocks, fn(list_item) -> store_readme_contents(list_item, depth+1) end)
+  defp find_data_in_contents(element = %Earmark.Block.ListItem{}) do
+    Enum.map(element.blocks, fn(list_item) -> find_data_in_contents list_item end)
   end
   
-  def store_readme_contents( element = %Earmark.Block.Para{}, 2) do
-    "header"
+  defp find_data_in_contents( element = %Earmark.Block.Para{}) do
+    element.lines |> Enum.join |> split_line
   end
   
-  def store_readme_contents( element = %Earmark.Block.Para{}, 4) do
-    "element"
+  defp find_data_in_contents(_) do
+    "unprocesed element"
   end
 
+  def split_line(line) when is_bitstring(line) do
+    list = Regex.run(~r{\[([^\]]+)\]\(([^)]+)\)}, line)
+    %{name: Enum.at(list, 1), link: Enum.at(list, 2)}
+  end
+  
+  def split_line(_) do
+    {"", ""}
+  end
 
+  def update_or_insert(object, search_param) do
+    db_struct = case Repo.get_by(object.__struct__, search_param) do
+      nil -> object
+      post -> post
+    end
+    search_param
+    section_changeset = object.__struct__.changeset(db_struct, search_param)
+    Repo.insert_or_update(section_changeset)
+  end
 
-
-
-
-
+  def store_section([content|items]) do
+    {:ok, section_entity} = update_or_insert(%Section{}, content)
+    List.flatten(items)
+    |> Enum.map(fn(item) -> 
+      item_map = Enum.into(%{}, item)
+      search_params = Map.put(item_map, :section_id, section_entity.id)
+      update_or_insert(%Content{}, search_params)  
+    end)
+  end
 end
