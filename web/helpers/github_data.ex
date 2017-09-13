@@ -24,8 +24,14 @@ defmodule Kekyl.GithubData do
     Tentacat.Contents.find(owner, repo, "README.md", client) |> parse_repo_readme
   end
 
+  def get_repo_additional_info(owner \\ "h4cc", repo \\ "awesome-elixir" , client \\ Tentacat.Client.new()) do
+    repo_info = Tentacat.Repositories.repo_get(owner, repo, client)
+    branch_info = Tentacat.Repositories.Branches.find(owner, repo, repo_info["default_branch"], client)
+    %{stars: repo_info["stargazers_count"],last_comit: branch_info["commit"]["commit"]["author"]["date"]}
+  end
+
   defp parse_repo_readme({404,_}) do
-    {:error, "Invalid URL"}
+    {:error, "parse_repo_readme: invalid URL"}
   end
 
   defp parse_repo_readme(responce) when is_map(responce) do
@@ -35,13 +41,25 @@ defmodule Kekyl.GithubData do
   end
 
   defp parse_repo_readme(_) do
-    {:error, "parse_repo_readme - unxpected result"}
+    {:error, "parse_repo_readme: unxpected result"}
   end
   
-  def parse_readme_content({content, _}) do
-    Enum.find(content, [], fn(item) -> is_earmark_list item end)
+
+ 
+  def parse_readme_content({:ok, {content, _}}) do
+    # Вытащим интересующи нас список(к сожалениюю не придумал как более изящно это сделать 
+    # т.к. у списка нет никаких отличительных черт)
+    contents_list = Enum.find(content, [], fn(item) -> is_earmark_list item end) 
+    content_list = List.first(contents_list.blocks)
+    
+    Enum.find(content_list.blocks, [], fn(item) -> is_earmark_list item end) 
     |> find_data_in_contents 
-    |> Enum.map(fn(section) -> store_section section end)
+    |> List.flatten
+    |> Enum.map(fn(section) -> update_or_insert(%Content{}, section)  end)
+  end
+  
+  def parse_readme_content({:error, message}) do
+    "parse_readme_content: can't parse contents section (#{message})"
   end
 
   def is_earmark_list(%Earmark.Block.List{}) do
@@ -51,7 +69,7 @@ defmodule Kekyl.GithubData do
   def is_earmark_list(_) do
     false
   end
-  
+
   def is_earmark_para(%Earmark.Block.Para{}) do
     true
   end
@@ -67,6 +85,10 @@ defmodule Kekyl.GithubData do
   def is_earmark_heading_2(_) do
     false
   end
+
+  # На самом деле эта функция подойдет для того что бы распарсить все оглавление
+  # (включая секцию resource и contributing)
+  # Но это не входит в требования к заданию
   
   defp find_data_in_contents(element = %Earmark.Block.List{}) do
     Enum.map(element.blocks, fn(list_item) -> find_data_in_contents list_item end)
@@ -77,79 +99,69 @@ defmodule Kekyl.GithubData do
   end
   
   defp find_data_in_contents(element = %Earmark.Block.Para{}) do
-    element.lines |> Enum.join |> split_line 
+    data = element.lines 
+    |> Enum.join 
+    |> Earmark.Helpers.LinkParser.parse_link(Earmark.Options)
+    |> Tuple.to_list
+    |> Enum.slice(1..2)
+    Enum.zip([:name, :link, :title], data)
+    |> Enum.into(%{})
   end
   
   defp find_data_in_contents(_) do
     "unprocessed element"
   end
 
-  def split_line(line, params \\ [:name, :link, :title] )
+  def split_line(line, regex, params \\ [:name, :link, :title] )
 
-  def split_line(line, params ) when is_bitstring(line) do
-    data = Regex.run(~r{\[([^\]]+)\]\(([^)]+)\)\W*-?\W*([^\]]+\W?)*}, line)
-    |> Enum.slice(1..-1)
-    Enum.zip(params, data) 
-    |> Enum.into(%{})
+  def split_line(line, regex, params ) when is_bitstring(line) do
+      data = Regex.run(regex, line)
+      |> Enum.slice(1..-1)
+      Enum.zip(params, data)
+      |> Enum.into(%{})
   end
   
-  def split_line(_, _) do
+  def split_line(_,_, _) do
     %{name: "",link: ""}
   end
 
-  def update_or_insert(object, search_param) do
+  def update_or_insert(object, search_param, additional_params \\ %{}) do
     db_struct = case Repo.get_by(object.__struct__, search_param) do
       nil -> object
       post -> post
     end
-    section_changeset = object.__struct__.changeset(db_struct, search_param)
+    params = Map.merge(search_param, additional_params)
+    section_changeset = object.__struct__.changeset(db_struct, params)
     Repo.insert_or_update(section_changeset)
   end
 
-  def store_section([content|items]) do
-    {:ok, section_entity} = update_or_insert(%Section{}, content)
-    List.flatten(items)
-    |> Enum.map(fn(item) -> 
-      item_map = Enum.into(%{}, item)
-      search_params = Map.put(item_map, :section_id, section_entity.id)
-      update_or_insert(%Content{}, search_params)  
-    end)
-  end
-
   def store_repos(item) do
-    # item.repos
     content_entity = case Repo.get_by(Content, %{name: item.name}) do
       nil -> nil
       post -> post
     end
+    # content_entity
     Enum.map(item.repos, fn(repo) -> 
-      repo_map = Enum.into(%{}, repo)
-      search_params = Map.put(repo_map, :content_id, content_entity.id)
-      update_or_insert(%GithubRepo{}, search_params)  
+      repository_entitty = Map.put(repo, :content_id, content_entity.id)
+      # additional_params = get_repo_additional_info(Enum.at(parsed_url, 1),Enum.at(parsed_url, 2))
+      # update_or_insert(%GithubRepo{}, search_params, additional_params)  
     end)
   end
 
-  def parse_readme_repositiries({content, _}) do
+  def parse_readme_repositiries({:ok, {content, _}}) do
     content
     |> Enum.slice(5..-1)
-    |> remove_heading
-    |> Enum.chunk(3)
+    |> Enum.take_while(fn(item) -> not is_earmark_heading_2(item) end)
+    |> Enum.chunk(3) 
     |> Enum.map(fn([heading, para, list]) -> 
-      %{name: heading.content, title: Enum.join(para.lines), repos: List.flatten(find_data_in_contents(list)) }
+      # heading
+      %{
+      name: heading.content,
+      title: Enum.join(para.lines), 
+      repos: find_data_in_contents(list) 
+             |> List.flatten |> Enum.filter(fn(link) ->  split_line( link.link, ~r{\[([^\]]+)\]\(([^)]+)\)\W*-?\W*([^\]]+\W?)*} ) end) }
     end )
-    |> Enum.map(fn(section) -> store_repos section end)
-  end
-
-  def remove_heading(list) do
-    index = Enum.find_index(list, fn(item) -> is_earmark_heading_2(item) end)
-    if index do
-      # Удаляем h1 заголовок и описание к нему
-      new_list = List.delete_at(list, index)
-      |> List.delete_at(index)
-      remove_heading(new_list)
-    else
-      list
-    end
+    # |> Enum.map(fn(section) -> store_repos section end)
   end
 
 end
